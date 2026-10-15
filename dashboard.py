@@ -1,45 +1,51 @@
 """
 dashboard.py
 -------------
-Interactive Streamlit Web Dashboard for Adaptive AI-Driven CPU Scheduling.
+Interactive Streamlit Dashboard — Adaptive AI-Driven CPU Scheduler.
 
-Sections:
-    ① Sidebar Controls       – Sliders for simulation parameters.
-    ② Run Button             – Triggers ML classification + simulation.
-    ③ AI Insight Cards       – ML label, confidence, selected policy.
-    ④ Gantt Chart            – Plotly timeline of process execution blocks.
-    ⑤ Process Metrics Table  – Per-process completion / waiting / turnaround times.
-    ⑥ Comparison Bar Charts  – AWT and ATAT across all five schedulers.
+New in this version
+───────────────────
+• True Runtime Adaptation  via TrueAdaptiveScheduler (policy switches mid-sim).
+• Adaptation Timeline Log  showing every policy-transition event.
+• Policy-coloured Gantt    (SRTF=indigo, RR=pink, Priority=amber).
+• Workload Input Modes:
+    1. Random Generator   – sliders (original behaviour)
+    2. Manual Table Input – st.data_editor (add/edit/delete rows)
+    3. Classic OS Presets – pre-built scenario dropdown
 
-Run with:
+Run:
     streamlit run dashboard.py
 """
 
 import sys
 import os
 
-# Ensure the project root is on PYTHONPATH so all modules resolve.
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 
+from core.process import Process
 from core.simulation_engine import SimulationEngine, generate_processes
-from scheduler.adaptive_scheduler import AdaptiveScheduler
+from scheduler.adaptive_scheduler import (
+    TrueAdaptiveScheduler,
+    POLICY_COLORS,
+    POLICY_SRTF,
+    POLICY_RR,
+    POLICY_PRIORITY,
+)
 from metrics.calculator import (
     processes_to_dataframe,
     comparison_dataframe,
 )
 
-# ---------------------------------------------------------------------------
-# Page configuration
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Adaptive AI CPU Scheduler",
@@ -48,13 +54,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Custom CSS — dark glassmorphism theme
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# CSS — dark glassmorphism
+# ─────────────────────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
-/* ── Google Font ── */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 html, body, [class*="css"] {
@@ -62,425 +67,491 @@ html, body, [class*="css"] {
     background: #0a0e1a;
     color: #e2e8f0;
 }
-
-/* ── Gradient hero header ── */
 .hero-header {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    font-size: 2.8rem;
-    font-weight: 800;
-    line-height: 1.2;
-    margin-bottom: 0.2rem;
+    font-size: 2.8rem; font-weight: 800; line-height: 1.2; margin-bottom: 0.2rem;
 }
+.hero-sub { color: #94a3b8; font-size: 1.05rem; font-weight: 400; margin-bottom: 2rem; }
 
-.hero-sub {
-    color: #94a3b8;
-    font-size: 1.05rem;
-    font-weight: 400;
-    margin-bottom: 2rem;
-}
-
-/* ── Metric cards ── */
+/* Metric cards */
 .metric-card {
     background: rgba(255,255,255,0.04);
     border: 1px solid rgba(255,255,255,0.10);
-    border-radius: 16px;
-    padding: 1.4rem 1.6rem;
+    border-radius: 16px; padding: 1.4rem 1.6rem;
     backdrop-filter: blur(10px);
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
-.metric-card:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 40px rgba(102,126,234,0.25);
-}
-.metric-label {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #64748b;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 0.4rem;
-}
-.metric-value {
-    font-size: 1.9rem;
-    font-weight: 700;
-    line-height: 1;
-}
-.metric-sub {
-    font-size: 0.82rem;
-    color: #94a3b8;
-    margin-top: 0.3rem;
-}
-
-/* Colour variants */
+.metric-card:hover { transform: translateY(-3px); box-shadow: 0 12px 40px rgba(102,126,234,0.25); }
+.metric-label { font-size: 0.78rem; font-weight: 600; color: #64748b;
+    text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem; }
+.metric-value { font-size: 1.9rem; font-weight: 700; line-height: 1; }
+.metric-sub   { font-size: 0.82rem; color: #94a3b8; margin-top: 0.3rem; }
 .card-purple .metric-value { color: #a78bfa; }
 .card-cyan   .metric-value { color: #67e8f9; }
 .card-green  .metric-value { color: #6ee7b7; }
 .card-orange .metric-value { color: #fbbf24; }
 .card-pink   .metric-value { color: #f9a8d4; }
 
-/* ── Section headings ── */
+/* Section heading */
 .section-heading {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #e2e8f0;
-    border-left: 4px solid #667eea;
-    padding-left: 0.75rem;
+    font-size: 1.25rem; font-weight: 700; color: #e2e8f0;
+    border-left: 4px solid #667eea; padding-left: 0.75rem;
     margin: 1.8rem 0 1rem 0;
 }
 
-/* ── Justification box ── */
+/* Adaptation log row colours */
+.adapt-srtf     { background: rgba(102,126,234,0.15); border-left: 3px solid #667eea; }
+.adapt-rr       { background: rgba(240,147,251,0.15); border-left: 3px solid #f093fb; }
+.adapt-priority { background: rgba(251,191,36,0.15);  border-left: 3px solid #fbbf24; }
+
+/* Justification box */
 .justification-box {
-    background: rgba(102,126,234,0.12);
-    border: 1px solid rgba(102,126,234,0.30);
-    border-radius: 12px;
-    padding: 1rem 1.4rem;
-    font-size: 0.92rem;
-    color: #c7d2fe;
-    line-height: 1.7;
+    background: rgba(102,126,234,0.12); border: 1px solid rgba(102,126,234,0.30);
+    border-radius: 12px; padding: 1rem 1.4rem; font-size: 0.92rem;
+    color: #c7d2fe; line-height: 1.7;
 }
 
-/* ── Sidebar ── */
+/* Policy badges */
+.badge {
+    display: inline-block; border-radius: 6px; padding: 2px 10px;
+    font-size: 0.78rem; font-weight: 600; margin: 2px;
+}
+.badge-srtf     { background: rgba(102,126,234,0.30); color: #a5b4fc; }
+.badge-rr       { background: rgba(240,147,251,0.30); color: #f5d0fe; }
+.badge-priority { background: rgba(251,191,36,0.30);  color: #fde68a; }
+
+/* Sidebar */
 [data-testid="stSidebar"] {
     background: rgba(15,20,40,0.98);
     border-right: 1px solid rgba(255,255,255,0.06);
 }
-
-/* ── Tables ── */
-.stDataFrame {
-    border-radius: 12px;
-    overflow: hidden;
-}
-
-/* ── Buttons ── */
+/* Buttons */
 .stButton > button {
     background: linear-gradient(135deg, #667eea, #764ba2);
-    color: white;
-    border: none;
-    border-radius: 12px;
-    padding: 0.7rem 2rem;
-    font-size: 1rem;
-    font-weight: 600;
-    width: 100%;
-    transition: opacity 0.2s ease, transform 0.1s ease;
+    color: white; border: none; border-radius: 12px;
+    padding: 0.7rem 2rem; font-size: 1rem; font-weight: 600;
+    width: 100%; transition: opacity 0.2s ease, transform 0.1s ease;
 }
-.stButton > button:hover {
-    opacity: 0.90;
-    transform: translateY(-1px);
-}
+.stButton > button:hover { opacity: 0.90; transform: translateY(-1px); }
 
-/* ── Confidence bar ── */
+/* Confidence bar */
 .conf-bar-bg {
-    background: rgba(255,255,255,0.08);
-    border-radius: 99px;
-    height: 8px;
-    margin-top: 8px;
-    overflow: hidden;
+    background: rgba(255,255,255,0.08); border-radius: 99px;
+    height: 8px; margin-top: 8px; overflow: hidden;
 }
 .conf-bar-fill {
-    height: 8px;
-    border-radius: 99px;
+    height: 8px; border-radius: 99px;
     background: linear-gradient(90deg, #667eea, #f093fb);
     transition: width 0.8s ease;
 }
-
-/* ── Divider ── */
 hr { border-color: rgba(255,255,255,0.07); margin: 1.5rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Constants: Classic OS Presets
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Colour palette for Gantt chart (one colour per process, cycling)
-# ---------------------------------------------------------------------------
+PRESETS: dict = {
+    "Convoy Effect Demo": [
+        # One long process blocks many short ones (classic FCFS problem)
+        {"PID": 1, "Arrival Time": 0, "Burst Time": 30, "Priority": 5, "I/O Frequency": 0.00},
+        {"PID": 2, "Arrival Time": 1, "Burst Time": 2,  "Priority": 5, "I/O Frequency": 0.10},
+        {"PID": 3, "Arrival Time": 2, "Burst Time": 2,  "Priority": 5, "I/O Frequency": 0.10},
+        {"PID": 4, "Arrival Time": 3, "Burst Time": 2,  "Priority": 5, "I/O Frequency": 0.10},
+        {"PID": 5, "Arrival Time": 4, "Burst Time": 2,  "Priority": 5, "I/O Frequency": 0.10},
+    ],
+    "Mixed Batch & Interactive": [
+        # Long CPU jobs interleaved with short I/O-heavy interactive tasks
+        {"PID": 1, "Arrival Time": 0, "Burst Time": 20, "Priority": 3, "I/O Frequency": 0.05},
+        {"PID": 2, "Arrival Time": 1, "Burst Time": 3,  "Priority": 4, "I/O Frequency": 0.80},
+        {"PID": 3, "Arrival Time": 2, "Burst Time": 15, "Priority": 3, "I/O Frequency": 0.05},
+        {"PID": 4, "Arrival Time": 3, "Burst Time": 2,  "Priority": 4, "I/O Frequency": 0.90},
+        {"PID": 5, "Arrival Time": 4, "Burst Time": 12, "Priority": 3, "I/O Frequency": 0.10},
+        {"PID": 6, "Arrival Time": 5, "Burst Time": 4,  "Priority": 4, "I/O Frequency": 0.75},
+    ],
+    "High-Priority Interruption": [
+        # An urgent (priority=1) process arrives mid-execution
+        {"PID": 1, "Arrival Time": 0, "Burst Time": 15, "Priority": 5, "I/O Frequency": 0.10},
+        {"PID": 2, "Arrival Time": 1, "Burst Time": 10, "Priority": 4, "I/O Frequency": 0.20},
+        {"PID": 3, "Arrival Time": 3, "Burst Time": 8,  "Priority": 1, "I/O Frequency": 0.10},
+        {"PID": 4, "Arrival Time": 5, "Burst Time": 6,  "Priority": 3, "I/O Frequency": 0.30},
+        {"PID": 5, "Arrival Time": 7, "Burst Time": 4,  "Priority": 2, "I/O Frequency": 0.20},
+    ],
+}
+
+PRESET_DESCRIPTIONS = {
+    "Convoy Effect Demo": (
+        "P1 (burst=30) monopolises the CPU; P2–P5 (burst=2 each) wait behind it. "
+        "FCFS performs worst here. The adaptive scheduler detects the short queue "
+        "and switches to SRTF to clear the backlog quickly."
+    ),
+    "Mixed Batch & Interactive": (
+        "Alternating heavy CPU processes and light I/O-intensive interactive tasks. "
+        "The adaptive scheduler switches between SRTF (for CPU jobs) and Round Robin "
+        "(for I/O jobs) as the queue composition changes."
+    ),
+    "High-Priority Interruption": (
+        "A critical process (priority=1) arrives at t=3 mid-simulation. "
+        "The adaptive scheduler detects the urgent task and switches to "
+        "Priority Scheduling to preempt lower-priority work immediately."
+    ),
+}
+
+
+def _default_manual_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {"PID": 1, "Arrival Time": 0,  "Burst Time": 5,  "Priority": 3, "I/O Frequency": 0.10},
+        {"PID": 2, "Arrival Time": 2,  "Burst Time": 8,  "Priority": 2, "I/O Frequency": 0.20},
+        {"PID": 3, "Arrival Time": 4,  "Burst Time": 3,  "Priority": 5, "I/O Frequency": 0.50},
+        {"PID": 4, "Arrival Time": 6,  "Burst Time": 6,  "Priority": 1, "I/O Frequency": 0.30},
+        {"PID": 5, "Arrival Time": 8,  "Burst Time": 4,  "Priority": 4, "I/O Frequency": 0.60},
+    ])
+
+
+def _df_to_processes(df: pd.DataFrame) -> list:
+    """Convert a user-edited DataFrame into a list of Process objects."""
+    processes = []
+    seen_pids = set()
+    for _, row in df.iterrows():
+        try:
+            pid  = int(row["PID"])
+            arr  = max(0, int(row["Arrival Time"]))
+            burst= max(1, int(row["Burst Time"]))
+            prio = max(1, min(10, int(row["Priority"])))
+            io   = max(0.0, min(1.0, float(row["I/O Frequency"])))
+            if pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            processes.append(Process(pid=pid, arrival_time=arr, burst_time=burst,
+                                     priority=prio, io_frequency=io))
+        except Exception:
+            pass
+    return sorted(processes, key=lambda p: (p.arrival_time, p.pid))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colour helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 PROCESS_COLORS = [
-    "#667eea", "#f093fb", "#4ade80", "#fbbf24", "#67e8f9",
-    "#f87171", "#a78bfa", "#34d399", "#fb923c", "#38bdf8",
-    "#e879f9", "#86efac", "#fde68a", "#7dd3fc", "#fca5a5",
+    "#667eea","#f093fb","#4ade80","#fbbf24","#67e8f9",
+    "#f87171","#a78bfa","#34d399","#fb923c","#38bdf8",
+    "#e879f9","#86efac","#fde68a","#7dd3fc","#fca5a5",
 ]
 
-
-def _get_color(pid: int) -> str:
+def _pid_color(pid: int) -> str:
     return PROCESS_COLORS[(pid - 1) % len(PROCESS_COLORS)]
 
 
-# ---------------------------------------------------------------------------
-# Gantt chart builder
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Gantt chart  (handles both 3-tuple classic and 4-tuple adaptive timelines)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def build_gantt(timeline, processes, algorithm_name: str) -> go.Figure:
+def build_gantt(
+    timeline,
+    processes,
+    algorithm_name: str,
+    color_by_policy: bool = False,
+    adaptation_log: list = None,
+) -> go.Figure:
     """
-    Build an interactive Plotly Gantt chart from execution timeline intervals.
+    Build an interactive Plotly horizontal bar (Gantt) chart.
 
-    Args:
-        timeline       : List of (pid, start, end) tuples.
-        processes      : List of Process objects (for metadata).
-        algorithm_name : Title annotation.
-
-    Returns:
-        Plotly Figure.
+    color_by_policy=True  → bars coloured by policy (SRTF/RR/Priority)
+    color_by_policy=False → bars coloured by PID (classic scheduler view)
     """
     if not timeline:
         fig = go.Figure()
-        fig.update_layout(title="No data", template="plotly_dark")
+        fig.update_layout(title="No execution data", template="plotly_dark")
         return fig
 
     pid_map = {p.pid: p for p in processes}
+    has_policy = len(timeline[0]) == 4
+
     rows = []
-    for pid, start, end in timeline:
+    for entry in timeline:
+        if has_policy:
+            pid, start, end, pol = entry
+        else:
+            pid, start, end = entry
+            pol = algorithm_name
         proc = pid_map.get(pid)
-        io_f = proc.io_frequency if proc else 0.0
-        rows.append(dict(
-            Task=f"P{pid}",
-            Start=start,
-            Finish=end,
-            PID=pid,
-            Duration=end - start,
-            IOFreq=round(io_f, 3),
-        ))
+        rows.append(dict(pid=pid, start=start, end=end, duration=end-start,
+                         policy=pol, io_freq=round(proc.io_frequency, 3) if proc else 0))
 
     df = pd.DataFrame(rows)
-
     fig = go.Figure()
 
+    # One trace per (pid, policy) combination to keep legend clean
+    seen_legend = set()
     for _, row in df.iterrows():
-        pid = row["PID"]
-        color = _get_color(pid)
+        pid, pol = row["pid"], row["policy"]
+        color = POLICY_COLORS.get(pol, _pid_color(pid)) if color_by_policy else _pid_color(pid)
+        legend_key = pol if color_by_policy else f"P{pid}"
+        show_leg = legend_key not in seen_legend
+        if show_leg:
+            seen_legend.add(legend_key)
+
         fig.add_trace(go.Bar(
-            x=[row["Duration"]],
+            x=[row["duration"]],
             y=[f"P{pid}"],
-            base=[row["Start"]],
+            base=[row["start"]],
             orientation="h",
-            marker=dict(
-                color=color,
-                line=dict(color="rgba(0,0,0,0.4)", width=1),
-                opacity=0.88,
-            ),
-            text=f"  P{pid} [{row['Start']}→{row['Finish']}]",
+            marker=dict(color=color, opacity=0.88,
+                        line=dict(color="rgba(0,0,0,0.3)", width=1)),
+            text=f"  P{pid} [{row['start']}→{row['end']}]" if row["duration"] > 1 else "",
             textposition="inside",
             insidetextanchor="start",
             hovertemplate=(
-                f"<b>Process P{pid}</b><br>"
-                f"Start: {row['Start']}<br>"
-                f"End: {row['Finish']}<br>"
-                f"Duration: {row['Duration']} ticks<br>"
-                f"I/O Freq: {row['IOFreq']}"
+                f"<b>P{pid}</b><br>Policy: {pol}<br>"
+                f"Start: {row['start']} | End: {row['end']}<br>"
+                f"Duration: {row['duration']} ticks<br>I/O Freq: {row['io_freq']}"
                 "<extra></extra>"
             ),
-            showlegend=False,
+            name=legend_key,
+            showlegend=show_leg,
         ))
 
-    # Add a single invisible legend entry per PID for colour reference.
-    seen_pids = set()
-    for _, row in df.drop_duplicates("PID").iterrows():
-        pid = row["PID"]
-        if pid not in seen_pids:
-            fig.add_trace(go.Bar(
-                x=[0], y=[f"P{pid}"],
-                orientation="h",
-                marker=dict(color=_get_color(pid)),
-                name=f"P{pid}",
-                showlegend=True,
-                visible="legendonly",
-            ))
-            seen_pids.add(pid)
+    # Policy transition markers (vertical dashed lines)
+    if color_by_policy and adaptation_log:
+        for ev in adaptation_log[1:]:          # skip first (initial policy)
+            fig.add_vline(
+                x=ev["time"],
+                line_dash="dash",
+                line_color="rgba(255,255,255,0.35)",
+                line_width=1.5,
+                annotation_text=f"→{ev['policy'][:4]}",
+                annotation_font=dict(color="rgba(255,255,255,0.65)", size=10),
+                annotation_position="top",
+            )
 
-    unique_procs = sorted(df["PID"].unique())
-    y_labels = [f"P{pid}" for pid in unique_procs]
+    unique_pids = sorted(df["pid"].unique())
+    y_labels = [f"P{p}" for p in unique_pids]
 
     fig.update_layout(
-        title=dict(
-            text=f"<b>Gantt Chart — {algorithm_name}</b>",
-            font=dict(size=16, color="#e2e8f0"),
-            x=0.0,
-        ),
-        xaxis=dict(
-            title="Time (ticks)",
-            showgrid=True,
-            gridcolor="rgba(255,255,255,0.07)",
-            color="#94a3b8",
-            tickfont=dict(size=11),
-        ),
-        yaxis=dict(
-            title="Process",
-            categoryorder="array",
-            categoryarray=y_labels,
-            color="#94a3b8",
-            tickfont=dict(size=12),
-        ),
+        title=dict(text=f"<b>Gantt Chart — {algorithm_name}</b>",
+                   font=dict(size=16, color="#e2e8f0"), x=0.0),
+        xaxis=dict(title="Time (ticks)", showgrid=True,
+                   gridcolor="rgba(255,255,255,0.07)", color="#94a3b8"),
+        yaxis=dict(title="Process", categoryorder="array",
+                   categoryarray=y_labels, color="#94a3b8"),
         barmode="stack",
         paper_bgcolor="rgba(10,14,26,0)",
         plot_bgcolor="rgba(10,14,26,0.4)",
         font=dict(family="Inter, sans-serif", color="#e2e8f0"),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=11),
-        ),
-        height=max(280, 60 + len(unique_procs) * 42),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
+        height=max(300, 70 + len(unique_pids) * 44),
         margin=dict(l=60, r=30, t=70, b=50),
     )
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Comparison bar chart builder
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Comparison bar chart
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_comparison_chart(all_results: dict) -> go.Figure:
-    """
-    Side-by-side bar chart comparing AWT and ATAT across all schedulers.
-    """
+    short_names = {
+        "FCFS":          "FCFS",
+        "SJF":           "SJF (NP)",
+        "SRTF":          "SRTF",
+        "RR":            "Round Robin",
+        "Priority":      "Priority",
+        "TrueAdaptive":  "🧠 True Adaptive",
+    }
     labels, awt_vals, atat_vals = [], [], []
-
     for key, res in all_results.items():
         if "error" in res:
             continue
-        algo_short = {
-            "FCFS": "FCFS",
-            "SJF": "SJF",
-            "RR": "Round Robin",
-            "Priority": "Priority",
-            "Adaptive": "🧠 Adaptive AI",
-        }.get(key, key)
-        labels.append(algo_short)
+        labels.append(short_names.get(key, res.get("algorithm", key)))
         awt_vals.append(res.get("avg_waiting_time", 0.0))
         atat_vals.append(res.get("avg_turnaround_time", 0.0))
 
+    n = len(labels)
+    awt_colors  = ["#667eea"] * (n-1) + ["#f093fb"]
+    atat_colors = ["#4ade80"] * (n-1) + ["#fbbf24"]
+
     fig = go.Figure()
-
-    fig.add_trace(go.Bar(
-        name="Avg Waiting Time",
-        x=labels,
-        y=awt_vals,
-        marker=dict(
-            color=["#667eea"] * (len(labels) - 1) + ["#f093fb"],
-            line=dict(width=0),
-            opacity=0.88,
-        ),
-        text=[f"{v:.2f}" for v in awt_vals],
-        textposition="outside",
-        textfont=dict(size=11, color="#e2e8f0"),
-    ))
-
-    fig.add_trace(go.Bar(
-        name="Avg Turnaround Time",
-        x=labels,
-        y=atat_vals,
-        marker=dict(
-            color=["#4ade80"] * (len(labels) - 1) + ["#fbbf24"],
-            line=dict(width=0),
-            opacity=0.88,
-        ),
-        text=[f"{v:.2f}" for v in atat_vals],
-        textposition="outside",
-        textfont=dict(size=11, color="#e2e8f0"),
-    ))
+    fig.add_trace(go.Bar(name="Avg Waiting Time", x=labels, y=awt_vals,
+        marker=dict(color=awt_colors, opacity=0.88, line=dict(width=0)),
+        text=[f"{v:.2f}" for v in awt_vals], textposition="outside",
+        textfont=dict(size=11, color="#e2e8f0")))
+    fig.add_trace(go.Bar(name="Avg Turnaround Time", x=labels, y=atat_vals,
+        marker=dict(color=atat_colors, opacity=0.88, line=dict(width=0)),
+        text=[f"{v:.2f}" for v in atat_vals], textposition="outside",
+        textfont=dict(size=11, color="#e2e8f0")))
 
     fig.update_layout(
         barmode="group",
-        title=dict(
-            text="<b>Scheduler Comparison — AWT vs ATAT</b>",
-            font=dict(size=16, color="#e2e8f0"),
-            x=0.0,
-        ),
+        title=dict(text="<b>Scheduler Comparison — AWT vs ATAT</b>",
+                   font=dict(size=16, color="#e2e8f0"), x=0.0),
         xaxis=dict(color="#94a3b8", tickfont=dict(size=12)),
-        yaxis=dict(
-            title="Time (ticks)",
-            color="#94a3b8",
-            showgrid=True,
-            gridcolor="rgba(255,255,255,0.07)",
-        ),
+        yaxis=dict(title="Time (ticks)", color="#94a3b8", showgrid=True,
+                   gridcolor="rgba(255,255,255,0.07)"),
         paper_bgcolor="rgba(10,14,26,0)",
         plot_bgcolor="rgba(10,14,26,0.4)",
         font=dict(family="Inter, sans-serif", color="#e2e8f0"),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(size=12),
-        ),
-        height=420,
-        margin=dict(l=60, r=30, t=70, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=12)),
+        height=420, margin=dict(l=60, r=30, t=70, b=60),
     )
     return fig
 
 
-# ---------------------------------------------------------------------------
-# Metric card HTML builder
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Adaptation timeline log renderer
+# ─────────────────────────────────────────────────────────────────────────────
 
-def metric_card(label: str, value: str, sub: str = "", css_class: str = "card-purple") -> str:
+def render_adaptation_log(adaptation_log: list):
+    if not adaptation_log:
+        st.info("No policy transitions — a single policy was maintained throughout the simulation.")
+        return
+
+    BADGE = {
+        POLICY_SRTF:     '<span class="badge badge-srtf">SRTF</span>',
+        POLICY_RR:       '<span class="badge badge-rr">Round Robin</span>',
+        POLICY_PRIORITY: '<span class="badge badge-priority">Priority</span>',
+    }
+
+    rows_html = ""
+    for i, ev in enumerate(adaptation_log):
+        badge = BADGE.get(ev["policy"], ev["policy"])
+        pids  = ", ".join(f"P{p}" for p in ev.get("queue_pids", []))
+        bg    = "rgba(102,126,234,0.08)" if ev["policy"] == POLICY_SRTF else \
+                "rgba(240,147,251,0.08)" if ev["policy"] == POLICY_RR else \
+                "rgba(251,191,36,0.08)"
+        rows_html += f"""
+        <tr style="border-bottom:1px solid rgba(255,255,255,0.06);background:{bg};">
+            <td style="padding:8px 12px;color:#94a3b8;font-variant-numeric:tabular-nums;">
+                t = {ev['time']}
+            </td>
+            <td style="padding:8px 12px;">{badge}</td>
+            <td style="padding:8px 12px;color:#94a3b8;">{ev.get('queue_size',0)} proc</td>
+            <td style="padding:8px 12px;color:#64748b;font-size:0.82rem;">{pids}</td>
+            <td style="padding:8px 12px;color:#c7d2fe;font-size:0.88rem;">{ev['reason']}</td>
+        </tr>"""
+
+    st.markdown(f"""
+    <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;">
+        <thead>
+            <tr style="border-bottom:2px solid rgba(255,255,255,0.12);">
+                <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:0.78rem;
+                            text-transform:uppercase;letter-spacing:0.08em;">Time</th>
+                <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:0.78rem;
+                            text-transform:uppercase;letter-spacing:0.08em;">Policy</th>
+                <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:0.78rem;
+                            text-transform:uppercase;letter-spacing:0.08em;">Queue</th>
+                <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:0.78rem;
+                            text-transform:uppercase;letter-spacing:0.08em;">Active PIDs</th>
+                <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:0.78rem;
+                            text-transform:uppercase;letter-spacing:0.08em;">Reason</th>
+            </tr>
+        </thead>
+        <tbody>{rows_html}</tbody>
+    </table>""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Metric card helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def metric_card(label, value, sub="", css_class="card-purple"):
     return f"""
     <div class="metric-card {css_class}">
         <div class="metric-label">{label}</div>
         <div class="metric-value">{value}</div>
         {"<div class='metric-sub'>" + sub + "</div>" if sub else ""}
-    </div>
-    """
-
+    </div>"""
 
 def confidence_bar(conf: float) -> str:
-    pct = int(conf * 100)
-    return f"""
-    <div class="conf-bar-bg">
-        <div class="conf-bar-fill" style="width:{pct}%;"></div>
-    </div>
-    """
+    return (f'<div class="conf-bar-bg">'
+            f'<div class="conf-bar-fill" style="width:{int(conf*100)}%;"></div>'
+            f'</div>')
+
+def _highlight_col(col):
+    if col.max() == col.min():
+        return [""] * len(col)
+    norm = (col - col.min()) / (col.max() - col.min())
+    return [f"background-color:rgba({int(220*v+40*(1-v))},{int(40*v+180*(1-v))},80,0.30);"
+            f"color:#e2e8f0;" for v in norm]
+
+def _highlight_min(s):
+    is_min = s == s.min()
+    return ["background-color:rgba(110,231,183,0.20);color:#6ee7b7;font-weight:700"
+            if v else "" for v in is_min]
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # ── SIDEBAR ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.markdown("## ⚙️ Simulation Controls")
     st.markdown("---")
 
-    process_count = st.slider(
-        "Process Count",
-        min_value=3, max_value=30, value=10, step=1,
-        help="Number of processes to generate for this simulation batch.",
+    input_mode = st.radio(
+        "Workload Generation Mode",
+        ["🎲 Random Generator", "✏️ Manual Table Input", "📋 Classic OS Presets"],
+        help="Choose how to create the process batch for this simulation.",
     )
-    max_arrival = st.slider(
-        "Max Arrival Time",
-        min_value=0, max_value=50, value=20, step=1,
-        help="Upper bound (ticks) for random process arrival times.",
-    )
-    burst_min = st.slider(
-        "Min Burst Time",
-        min_value=1, max_value=20, value=2, step=1,
-    )
-    burst_max = st.slider(
-        "Max Burst Time",
-        min_value=2, max_value=80, value=20, step=1,
-    )
-    io_probability = st.slider(
-        "I/O Probability",
-        min_value=0.0, max_value=1.0, value=0.4, step=0.05,
-        help="Fraction of processes that are I/O-heavy.",
-    )
+
+    st.markdown("---")
+
+    # ── Mode 1: Random Generator ──────────────────────────────────────────
+    if input_mode == "🎲 Random Generator":
+        process_count = st.slider("Process Count",    min_value=3,  max_value=30, value=10)
+        max_arrival   = st.slider("Max Arrival Time", min_value=0,  max_value=50, value=20)
+        burst_min     = st.slider("Min Burst Time",   min_value=1,  max_value=20, value=2)
+        burst_max     = st.slider("Max Burst Time",   min_value=2,  max_value=80, value=20)
+        io_probability= st.slider("I/O Probability",  min_value=0.0,max_value=1.0,value=0.4, step=0.05)
+        random_seed   = st.number_input("Random Seed (0=random)", min_value=0, max_value=9999, value=42)
+
+    # ── Mode 2: Manual Table Input ────────────────────────────────────────
+    elif input_mode == "✏️ Manual Table Input":
+        st.markdown("**Edit the process table below.**")
+        st.caption("Add rows with the ＋ button. All changes are applied on Run.")
+        if "manual_df" not in st.session_state:
+            st.session_state["manual_df"] = _default_manual_df()
+        edited_df = st.data_editor(
+            st.session_state["manual_df"],
+            key="proc_table_editor",
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "PID":          st.column_config.NumberColumn("PID",          min_value=1,  max_value=99, step=1),
+                "Arrival Time": st.column_config.NumberColumn("Arrival Time", min_value=0,  max_value=200,step=1),
+                "Burst Time":   st.column_config.NumberColumn("Burst Time",   min_value=1,  max_value=100,step=1),
+                "Priority":     st.column_config.NumberColumn("Priority",     min_value=1,  max_value=10, step=1),
+                "I/O Frequency":st.column_config.NumberColumn("I/O Frequency",min_value=0.0,max_value=1.0,step=0.05,format="%.2f"),
+            },
+        )
+        st.session_state["manual_df"] = edited_df
+
+    # ── Mode 3: Classic OS Presets ────────────────────────────────────────
+    else:
+        preset_name = st.selectbox(
+            "Select Scenario",
+            options=list(PRESETS.keys()),
+        )
+        st.markdown(
+            f'<div class="justification-box" style="margin-top:8px;">'
+            f'📖 {PRESET_DESCRIPTIONS[preset_name]}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
     rr_quantum = st.slider(
-        "Round Robin Quantum",
-        min_value=1, max_value=20, value=4, step=1,
-        help="Base time quantum for Round Robin (and adaptive RR).",
-    )
-    random_seed = st.number_input(
-        "Random Seed (0 = random)",
-        min_value=0, max_value=9999, value=42, step=1,
+        "Round Robin Base Quantum",
+        min_value=1, max_value=20, value=4,
+        help="Used as the base quantum; adaptive scheduler may adjust it dynamically.",
     )
 
     st.markdown("---")
     st.markdown("### 🤖 ML Model")
-
     retrain_btn = st.button("🔄 Retrain ML Model")
     if retrain_btn:
         with st.spinner("Generating dataset & training model…"):
@@ -488,242 +559,251 @@ with st.sidebar:
                 from ml.data_generator import generate_dataset
                 from ml.train_model import train
                 from ml.predictor import reload_model
-
-                data_path = os.path.join(_ROOT, "data", "workload_dataset.csv")
+                data_path  = os.path.join(_ROOT, "data", "workload_dataset.csv")
                 model_path = os.path.join(_ROOT, "ml", "model.joblib")
                 generate_dataset(save=True, output_path=data_path)
                 train(data_path=data_path, model_path=model_path)
                 reload_model()
-                st.success("✅ Model retrained successfully!")
+                st.success("Model retrained successfully!")
             except Exception as exc:
                 st.error(f"Training failed: {exc}")
 
     st.markdown("---")
-    st.caption("Adaptive AI CPU Scheduler v1.0")
-    st.caption("Powered by scikit-learn + Streamlit")
+    st.caption("Adaptive AI CPU Scheduler v2.0")
+    st.caption("True Runtime Adaptation Edition")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # ── HERO HEADER ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown('<div class="hero-header">🧠 Adaptive AI-Driven CPU Scheduler</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-header">🧠 Adaptive AI-Driven CPU Scheduler</div>',
+            unsafe_allow_html=True)
 st.markdown(
-    '<div class="hero-sub">Machine Learning–powered workload classification with real-time '
-    'scheduling policy adaptation. Combines scikit-learn Random Forest classification '
-    'with FCFS, SJF, Round Robin, and Priority algorithms.</div>',
+    '<div class="hero-sub">True Runtime Adaptation — scheduling policy switches '
+    'dynamically mid-simulation based on live ready-queue characteristics. '
+    'Powered by scikit-learn + Streamlit + Plotly.</div>',
     unsafe_allow_html=True,
 )
-
 st.markdown("---")
 
-# ---------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ── RUN BUTTON ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
 run_col, info_col = st.columns([1, 3])
 with run_col:
     run_btn = st.button("▶ Run Simulation & AI Adaptation", use_container_width=True)
-
 with info_col:
-    st.info(
-        f"Ready to simulate **{process_count} processes** | "
-        f"Burst range [{burst_min}–{burst_max}] | "
-        f"I/O probability {io_probability:.0%} | "
-        f"RR Quantum {rr_quantum}"
-    )
+    if input_mode == "🎲 Random Generator":
+        st.info(f"Ready to simulate **{process_count} random processes** | "
+                f"Burst [{burst_min}–{burst_max}] | I/O prob {io_probability:.0%} | Q={rr_quantum}")
+    elif input_mode == "✏️ Manual Table Input":
+        st.info(f"Ready to simulate **{len(st.session_state.get('manual_df', _default_manual_df()))} "
+                f"manually defined processes** | Base Q={rr_quantum}")
+    else:
+        st.info(f"Preset: **{preset_name}** | "
+                f"{len(PRESETS[preset_name])} processes | Base Q={rr_quantum}")
 
-# ---------------------------------------------------------------------------
-# ── SIMULATION LOGIC ──
-# ---------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SIMULATION ──
+# ─────────────────────────────────────────────────────────────────────────────
 
 if run_btn:
-    seed_val = int(random_seed) if random_seed > 0 else None
-
-    with st.spinner("🔄 Generating processes & running AI scheduling pipeline…"):
+    with st.spinner("Running True Adaptive simulation + all classic schedulers…"):
         try:
-            # Generate process batch.
-            processes = generate_processes(
-                count=process_count,
-                max_arrival_time=max_arrival,
-                burst_time_range=(burst_min, burst_max),
-                io_probability=io_probability,
-                seed=seed_val,
-            )
+            # Build process list based on input mode
+            if input_mode == "🎲 Random Generator":
+                seed = int(random_seed) if random_seed > 0 else None
+                processes = generate_processes(
+                    count=process_count,
+                    max_arrival_time=max_arrival,
+                    burst_time_range=(burst_min, burst_max),
+                    io_probability=io_probability,
+                    seed=seed,
+                )
+            elif input_mode == "✏️ Manual Table Input":
+                processes = _df_to_processes(st.session_state["manual_df"])
+                if not processes:
+                    st.error("No valid processes in the table.")
+                    st.stop()
+            else:  # Preset
+                rows = PRESETS[preset_name]
+                processes = [
+                    Process(
+                        pid=r["PID"],
+                        arrival_time=r["Arrival Time"],
+                        burst_time=r["Burst Time"],
+                        priority=r["Priority"],
+                        io_frequency=r["I/O Frequency"],
+                    )
+                    for r in rows
+                ]
 
-            # Run adaptive (AI) scheduler.
-            adaptive = AdaptiveScheduler(base_quantum=rr_quantum)
-            adaptive_result = adaptive.run(processes, override_quantum=None)
+            # True Adaptive scheduler
+            scheduler = TrueAdaptiveScheduler(base_quantum=rr_quantum)
+            adaptive_result = scheduler.run(processes, base_quantum=rr_quantum)
 
-            # Run all classic schedulers for comparison.
+            # Classic schedulers
             engine = SimulationEngine(processes)
             all_classic = engine.run_all(time_quantum=rr_quantum)
 
-            # Merge all results for comparison chart.
-            all_results = {**all_classic, "Adaptive": adaptive_result}
+            # Merge all results
+            all_results = {**all_classic, "TrueAdaptive": adaptive_result}
 
         except Exception as exc:
-            st.error(f"❌ Simulation failed: {exc}")
+            st.error(f"Simulation failed: {exc}")
             st.exception(exc)
             st.stop()
 
-    # ── Store in session for persistence across re-renders ──
     st.session_state["adaptive_result"] = adaptive_result
-    st.session_state["all_results"] = all_results
-    st.session_state["processes"] = processes
+    st.session_state["all_results"]     = all_results
+    st.session_state["processes"]       = processes
+    st.session_state["input_mode"]      = input_mode
 
 
-# Retrieve from session state (so results persist after widget interactions).
+# Gate: require a completed run
 if "adaptive_result" not in st.session_state:
-    st.markdown(
-        """
-        <div style="text-align:center; padding: 4rem; color:#475569;">
-            <div style="font-size:4rem;">🚀</div>
-            <div style="font-size:1.2rem; font-weight:600; margin-top:1rem;">
-                Configure parameters in the sidebar and click <b>Run Simulation</b>
-            </div>
+    st.markdown("""
+    <div style="text-align:center;padding:4rem;color:#475569;">
+        <div style="font-size:4rem;">🚀</div>
+        <div style="font-size:1.2rem;font-weight:600;margin-top:1rem;">
+            Configure parameters in the sidebar and click <b>Run Simulation</b>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>""", unsafe_allow_html=True)
     st.stop()
 
 adaptive_result = st.session_state["adaptive_result"]
-all_results = st.session_state["all_results"]
-processes = st.session_state["processes"]
+all_results     = st.session_state["all_results"]
+processes       = st.session_state["processes"]
+adaptation_log  = adaptive_result.get("adaptation_log", [])
 
-prediction = adaptive_result["prediction"]
-label = prediction["label"]
-confidence = prediction["confidence"]
-selected_algo = adaptive_result["selected_algorithm"]
-justification = adaptive_result["justification"]
-time_quantum_used = adaptive_result["time_quantum"]
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # ── SECTION 1: AI INSIGHT CARDS ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-heading">🤖 AI Classification & Policy Decision</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading">🤖 AI Classification & Runtime Adaptation</div>',
+            unsafe_allow_html=True)
 
 c1, c2, c3, c4, c5 = st.columns(5)
 
-# Emoji per class
-class_emoji = {"CPU-bound": "⚡", "I/O-bound": "💾", "Mixed": "🔀"}.get(label, "🧠")
+label     = adaptive_result.get("workload_label", "Mixed")
+class_emoji = {"CPU-bound":"⚡","I/O-bound":"💾","Mixed":"🔀"}.get(label, "🧠")
+n_switches  = max(0, len(adaptation_log) - 1)
 
 with c1:
-    st.markdown(
-        metric_card("Workload Class", f"{class_emoji} {label}", sub="ML model prediction", css_class="card-purple"),
-        unsafe_allow_html=True,
-    )
+    st.markdown(metric_card("Workload Class", f"{class_emoji} {label}",
+                            "Initial ML prediction", "card-purple"), unsafe_allow_html=True)
 with c2:
-    conf_pct = f"{confidence * 100:.1f}%"
-    st.markdown(
-        metric_card("Confidence", conf_pct, sub=confidence_bar(confidence), css_class="card-cyan"),
-        unsafe_allow_html=True,
-    )
+    st.markdown(metric_card("Policy Switches", str(n_switches),
+                            "during simulation", "card-cyan"), unsafe_allow_html=True)
 with c3:
-    st.markdown(
-        metric_card("Selected Policy", selected_algo.split("(")[0].strip(), sub=f"Q={time_quantum_used} ticks", css_class="card-green"),
-        unsafe_allow_html=True,
-    )
+    policies_used = list(dict.fromkeys(e["policy"] for e in adaptation_log))
+    pol_str = " → ".join(policies_used) if policies_used else "—"
+    st.markdown(metric_card("Policies Used", str(len(policies_used)),
+                            pol_str[:30], "card-green"), unsafe_allow_html=True)
 with c4:
     awt = adaptive_result.get("avg_waiting_time", 0.0)
-    st.markdown(
-        metric_card("Avg Waiting Time", f"{awt:.2f}", sub="ticks (adaptive)", css_class="card-orange"),
-        unsafe_allow_html=True,
-    )
+    st.markdown(metric_card("Avg Waiting Time", f"{awt:.2f}",
+                            "ticks (adaptive)", "card-orange"), unsafe_allow_html=True)
 with c5:
     atat = adaptive_result.get("avg_turnaround_time", 0.0)
-    st.markdown(
-        metric_card("Avg Turnaround", f"{atat:.2f}", sub="ticks (adaptive)", css_class="card-pink"),
-        unsafe_allow_html=True,
-    )
+    st.markdown(metric_card("Avg Turnaround", f"{atat:.2f}",
+                            "ticks (adaptive)", "card-pink"), unsafe_allow_html=True)
 
-# Justification box
 st.markdown("<br>", unsafe_allow_html=True)
 st.markdown(
-    f'<div class="justification-box">💡 <b>Decision Rationale:</b> {justification}</div>',
+    f'<div class="justification-box">💡 <b>Adaptive Logic:</b> '
+    f'{adaptive_result.get("justification", "")}</div>',
     unsafe_allow_html=True,
 )
 
-# Probability breakdown
-st.markdown("<br>", unsafe_allow_html=True)
-prob_cols = st.columns(3)
-probs = prediction.get("probabilities", {})
-for idx, (cls_name, prob_val) in enumerate(probs.items()):
-    with prob_cols[idx]:
-        st.metric(
-            label=cls_name,
-            value=f"{prob_val * 100:.1f}%",
-            delta=None,
-        )
-        st.progress(float(prob_val))
-
 st.markdown("---")
 
-# ---------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ── SECTION 2: GANTT CHART ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown('<div class="section-heading">📊 Execution Gantt Chart</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-heading">📊 Execution Gantt Chart</div>',
+            unsafe_allow_html=True)
 
-gantt_tab1, gantt_tab2 = st.tabs(["🧠 Adaptive AI Scheduler", "🔁 Compare All Algorithms"])
+gantt_tab1, gantt_tab2 = st.tabs(["🧠 True Adaptive AI (by Policy)", "🔁 Compare All Algorithms"])
 
 with gantt_tab1:
-    gantt_fig = build_gantt(
+    adaptive_fig = build_gantt(
         timeline=adaptive_result["timeline"],
         processes=adaptive_result["processes"],
-        algorithm_name=adaptive_result["selected_algorithm"],
+        algorithm_name="True Adaptive AI Scheduler",
+        color_by_policy=True,
+        adaptation_log=adaptation_log,
     )
-    st.plotly_chart(gantt_fig, use_container_width=True, key="gantt_adaptive")
+    st.plotly_chart(adaptive_fig, use_container_width=True, key="gantt_adaptive")
+
+    # Policy legend chips
+    if adaptation_log:
+        pols_used = list(dict.fromkeys(e["policy"] for e in adaptation_log))
+        chips = "".join(
+            f'<span class="badge badge-{p.lower().replace(" ","")}">'
+            f'{p}</span>' for p in pols_used
+        )
+        st.markdown(f"**Policies active in this run:** {chips}", unsafe_allow_html=True)
 
 with gantt_tab2:
     def _gantt_label(k):
-        if k == "Adaptive":
-            return f"🧠 AI Adaptive → {all_results[k].get('algorithm', k)}"
+        if k == "TrueAdaptive":
+            return "🧠 True Adaptive AI"
         return all_results[k].get("algorithm", k)
 
     algo_select = st.selectbox(
         "Select Algorithm to View Gantt",
         options=list(all_results.keys()),
         format_func=_gantt_label,
+        key="gantt_algo_select",
     )
-    sel_result = all_results[algo_select]
-    if "error" in sel_result:
-        st.error(f"Error: {sel_result['error']}")
+    sel_res = all_results[algo_select]
+    if "error" in sel_res:
+        st.error(f"Scheduler error: {sel_res['error']}")
     else:
+        is_adaptive = algo_select == "TrueAdaptive"
         fig2 = build_gantt(
-            timeline=sel_result["timeline"],
-            processes=sel_result["processes"],
+            timeline=sel_res["timeline"],
+            processes=sel_res["processes"],
             algorithm_name=_gantt_label(algo_select),
+            color_by_policy=is_adaptive,
+            adaptation_log=sel_res.get("adaptation_log", []) if is_adaptive else [],
         )
         st.plotly_chart(fig2, use_container_width=True, key=f"gantt_{algo_select}")
 
 st.markdown("---")
 
-# ---------------------------------------------------------------------------
-# ── SECTION 3: PROCESS METRICS TABLE ──
-# ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-heading">📋 Process-Level Metrics</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SECTION 3: ADAPTATION TIMELINE LOG ──
+# ─────────────────────────────────────────────────────────────────────────────
 
-table_tab1, table_tab2 = st.tabs(["🧠 Adaptive AI Scheduler", "📊 All Classic Schedulers"])
+st.markdown('<div class="section-heading">⚡ Adaptation Timeline Log</div>',
+            unsafe_allow_html=True)
+st.caption("Every row is a moment the scheduler re-evaluated the ready queue and selected a new policy.")
 
-def _highlight_col(col):
-    """Colour-scale a column from green (low) to red (high) using pure CSS — no matplotlib needed."""
-    if col.max() == col.min():
-        return [""] * len(col)
-    norm = (col - col.min()) / (col.max() - col.min())   # 0 = best (green), 1 = worst (red)
-    styles = []
-    for v in norm:
-        r = int(220 * v + 40 * (1 - v))
-        g = int(40 * v + 180 * (1 - v))
-        b = 80
-        styles.append(f"background-color: rgba({r},{g},{b},0.30); color: #e2e8f0;")
-    return styles
+render_adaptation_log(adaptation_log)
+
+st.markdown("---")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SECTION 4: PROCESS METRICS TABLE ──
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.markdown('<div class="section-heading">📋 Process-Level Metrics</div>',
+            unsafe_allow_html=True)
+
+table_tab1, table_tab2 = st.tabs(["🧠 Adaptive AI", "📊 All Classic Schedulers"])
 
 with table_tab1:
-    from metrics.calculator import processes_to_dataframe
     proc_df = processes_to_dataframe(adaptive_result["processes"])
     st.dataframe(
         proc_df.style
@@ -731,52 +811,47 @@ with table_tab1:
             .apply(_highlight_col, subset=["Waiting Time", "Turnaround Time"]),
         use_container_width=True,
         height=min(600, 80 + len(proc_df) * 38),
+        hide_index=True,
     )
 
 with table_tab2:
     for algo_key, res in all_results.items():
-        if "error" in res:
+        if "error" in res or algo_key == "TrueAdaptive":
             continue
-        with st.expander(f"**{res['algorithm']}** — AWT: {res.get('avg_waiting_time',0):.2f} | ATAT: {res.get('avg_turnaround_time',0):.2f}"):
+        label_str = res["algorithm"]
+        with st.expander(
+            f"**{label_str}** — AWT: {res.get('avg_waiting_time',0):.2f} | "
+            f"ATAT: {res.get('avg_turnaround_time',0):.2f}"
+        ):
             df_res = processes_to_dataframe(res["processes"])
-            st.dataframe(df_res.style.format(precision=2), use_container_width=True)
+            st.dataframe(df_res.style.format(precision=2),
+                         use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
-# ---------------------------------------------------------------------------
-# ── SECTION 4: COMPARISON CHARTS ──
-# ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-heading">📈 Algorithm Comparison</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SECTION 5: COMPARISON CHARTS ──
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Bar chart — AWT vs ATAT
+st.markdown('<div class="section-heading">📈 Algorithm Comparison</div>',
+            unsafe_allow_html=True)
+
 comp_fig = build_comparison_chart(all_results)
-st.plotly_chart(comp_fig, use_container_width=True)
+st.plotly_chart(comp_fig, use_container_width=True, key="comparison_chart")
 
 # Numeric comparison table
-from metrics.calculator import comparison_dataframe
 comp_df = comparison_dataframe(all_results)
-
-# Move index into a plain column to avoid non-unique index issues with Styler
-selected_algo = adaptive_result["selected_algorithm"]
-comp_df = comp_df.reset_index()   # 'Algorithm' becomes a regular column
+selected_algo_name = adaptive_result["selected_algorithm"]
+comp_df = comp_df.reset_index()
 comp_df["Algorithm"] = comp_df["Algorithm"].apply(
-    lambda name: f"🧠 {name}" if name == selected_algo else name
+    lambda name: f"🧠 {name}" if name == selected_algo_name else name
 )
-
-# Highlight minimum AWT and ATAT (numeric columns only — no emoji in index)
-def _highlight_min(s):
-    is_min = s == s.min()
-    return [
-        "background-color: rgba(110,231,183,0.20); color: #6ee7b7; font-weight:700"
-        if v else ""
-        for v in is_min
-    ]
 
 st.dataframe(
     comp_df.style
         .format(precision=3, subset=["Avg Waiting Time", "Avg Turnaround Time",
-                                      "Avg Response Time", "Throughput"])
+                                     "Avg Response Time", "Throughput"])
         .apply(_highlight_min, subset=["Avg Waiting Time", "Avg Turnaround Time"]),
     use_container_width=True,
     hide_index=True,
@@ -784,55 +859,49 @@ st.dataframe(
 
 st.markdown("---")
 
-# ---------------------------------------------------------------------------
-# ── SECTION 5: FEATURE ENGINEERING INSIGHT ──
-# ---------------------------------------------------------------------------
 
-st.markdown('<div class="section-heading">🔬 Extracted Feature Vector</div>', unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# ── SECTION 6: FEATURE VECTOR ──
+# ─────────────────────────────────────────────────────────────────────────────
 
-feat_dict = prediction.get("features", {})
-feat_names = list(feat_dict.keys())
-feat_vals = list(feat_dict.values())
+st.markdown('<div class="section-heading">🔬 ML Feature Vector (Initial Batch)</div>',
+            unsafe_allow_html=True)
 
-feat_fig = go.Figure(go.Bar(
-    x=feat_names,
-    y=feat_vals,
-    marker=dict(
-        color=["#667eea", "#f093fb", "#4ade80", "#fbbf24", "#67e8f9"],
-        opacity=0.85,
-        line=dict(width=0),
-    ),
-    text=[f"{v:.3f}" for v in feat_vals],
-    textposition="outside",
-    textfont=dict(size=12, color="#e2e8f0"),
-))
+try:
+    from ml.predictor import extract_features, FEATURE_COLS
+    feat_vec = extract_features(processes)
+    feat_fig = go.Figure(go.Bar(
+        x=FEATURE_COLS, y=feat_vec.tolist(),
+        marker=dict(color=["#667eea","#f093fb","#4ade80","#fbbf24","#67e8f9"],
+                    opacity=0.85, line=dict(width=0)),
+        text=[f"{v:.3f}" for v in feat_vec],
+        textposition="outside",
+        textfont=dict(size=12, color="#e2e8f0"),
+    ))
+    feat_fig.update_layout(
+        title=dict(text="<b>Feature Vector fed to ML Classifier (initial batch)</b>",
+                   font=dict(size=14, color="#e2e8f0")),
+        xaxis=dict(color="#94a3b8", tickfont=dict(size=12)),
+        yaxis=dict(color="#94a3b8", showgrid=True,
+                   gridcolor="rgba(255,255,255,0.07)"),
+        paper_bgcolor="rgba(10,14,26,0)",
+        plot_bgcolor="rgba(10,14,26,0.4)",
+        font=dict(family="Inter, sans-serif", color="#e2e8f0"),
+        height=320, margin=dict(l=40, r=30, t=60, b=60),
+    )
+    st.plotly_chart(feat_fig, use_container_width=True, key="feature_chart")
+except Exception:
+    pass
 
-feat_fig.update_layout(
-    title=dict(
-        text="<b>Feature Vector fed to ML Classifier</b>",
-        font=dict(size=14, color="#e2e8f0"),
-    ),
-    xaxis=dict(color="#94a3b8", tickfont=dict(size=12)),
-    yaxis=dict(color="#94a3b8", showgrid=True, gridcolor="rgba(255,255,255,0.07)"),
-    paper_bgcolor="rgba(10,14,26,0)",
-    plot_bgcolor="rgba(10,14,26,0.4)",
-    font=dict(family="Inter, sans-serif", color="#e2e8f0"),
-    height=320,
-    margin=dict(l=40, r=30, t=60, b=60),
-)
-st.plotly_chart(feat_fig, use_container_width=True)
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # ── FOOTER ──
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.markdown("---")
-st.markdown(
-    """
-    <div style="text-align:center; color:#475569; font-size:0.85rem; padding:1rem 0;">
-        🧠 Adaptive AI-Driven CPU Scheduler &nbsp;·&nbsp;
-        Built with Streamlit, scikit-learn, and Plotly &nbsp;·&nbsp;
-        Random Forest Classifier with 1,500+ training samples
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<div style="text-align:center;color:#475569;font-size:0.85rem;padding:1rem 0;">
+    🧠 Adaptive AI-Driven CPU Scheduler v2.0 &nbsp;·&nbsp;
+    True Runtime Adaptation Edition &nbsp;·&nbsp;
+    Streamlit + scikit-learn + Plotly
+</div>""", unsafe_allow_html=True)
