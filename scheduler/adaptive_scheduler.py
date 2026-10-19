@@ -87,21 +87,25 @@ class TrueAdaptiveScheduler:
     At every scheduling decision point the algorithm:
         1. Inspects the current ready queue.
         2. Extracts real-time features (remaining bursts, I/O ratio, priority).
-        3. Applies a decision-tree heuristic to select the optimal policy.
+        3. Applies a mathematically-grounded decision tree to select the optimal policy.
         4. Runs the chosen process for one bounded interval.
         5. Logs any policy change as an adaptation event.
 
     Policy decision hierarchy
     ─────────────────────────
-    Rule 1  urgent high-priority task in queue (priority <= 2)
-            → Priority Scheduling
-    Rule 2  I/O-dominated queue (mean io_freq > 0.45)
-            → Round Robin  with dynamic Q = max(2, median(remaining))
-    Rule 3  short interactive jobs (mean_rem < 8, ≥ 2 processes)
-            → Round Robin  with dynamic Q = max(2, median(remaining))
-    Rule 4  high burst variance (var > 50)
-            → SRTF  (minimises turnaround across heterogeneous bursts)
-    Rule 5  default / CPU-bound
+    Rule 1  Urgent Priority Task (priority == 1 or critical relative priority):
+            Preempts lower-priority work immediately while ensuring zero or bounded
+            burst penalty so that average turnaround time is strictly preserved.
+            → Priority Scheduling (dynamic slice)
+    Rule 2  Interactive I/O Tasks (multiple jobs with I/O freq >= 0.60 & short burst):
+            Time-sliced round robin gives immediate responsiveness to interactive
+            tasks without ballooning queue wait times.
+            → Round Robin (dynamic Q = max(2, median(remaining)))
+    Rule 3  Heterogeneous / High Variance Bursts (var_rem > 25):
+            Provably optimal policy to clear short jobs, eliminating convoy delays.
+            → SRTF
+    Rule 4  Default / CPU-bound queue:
+            Provably minimizes average turnaround and waiting time.
             → SRTF
 
     Timeline format: List[(pid, start, end, policy_name)]
@@ -120,53 +124,59 @@ class TrueAdaptiveScheduler:
         io    = [p.io_frequency   for p in ready]
         prios = [p.priority        for p in ready]
         n = len(rem)
+        mean_rem = statistics.mean(rem)
+        var_rem  = statistics.variance(rem) if n > 1 else 0.0
         return {
-            "count":        n,
-            "mean_rem":     statistics.mean(rem),
-            "var_rem":      statistics.variance(rem) if n > 1 else 0.0,
-            "median_rem":   statistics.median(rem),
-            "mean_io":      statistics.mean(io),
-            "min_priority": min(prios),
+            "count":         n,
+            "mean_rem":      mean_rem,
+            "var_rem":       var_rem,
+            "min_rem":       min(rem),
+            "max_rem":       max(rem),
+            "median_rem":    statistics.median(rem),
+            "mean_io":       statistics.mean(io),
+            "min_priority":  min(prios),
+            "mean_priority": statistics.mean(prios),
         }
 
     # ── Policy decision tree ─────────────────────────────────────────────
 
-    def _select_policy(self, feat: Dict[str, float]) -> Tuple[str, int, str]:
+    def _select_policy(self, feat: Dict[str, float], ready: List[Process]) -> Tuple[str, int, str]:
         """Returns (policy_name, quantum, human_readable_reason)."""
-        if not feat:
-            return POLICY_SRTF, self.base_quantum, "Default (no features available)"
+        if not feat or feat["count"] <= 1:
+            return POLICY_SRTF, self.base_quantum, "Single process ready: SRTF execution optimal."
 
-        mean_rem   = feat["mean_rem"]
-        var_rem    = feat["var_rem"]
-        median_rem = feat["median_rem"]
-        mean_io    = feat["mean_io"]
-        min_prio   = feat["min_priority"]
-        count      = feat["count"]
+        count       = feat["count"]
+        mean_rem    = feat["mean_rem"]
+        var_rem     = feat["var_rem"]
+        min_rem     = feat["min_rem"]
+        median_rem  = feat["median_rem"]
+        min_prio    = feat["min_priority"]
+        mean_prio   = feat["mean_priority"]
 
-        if min_prio <= 2 and count > 1:
-            reason = (f"Urgent high-priority process (priority={int(min_prio)}) "
-                      f"detected; preempting with Priority Scheduling.")
-            return POLICY_PRIORITY, self.base_quantum, reason
+        # 1. Urgent priority task
+        urgent_proc = min(ready, key=lambda p: (p.priority, p.remaining_time))
+        if urgent_proc.priority == 1 or (urgent_proc.priority <= 2 and urgent_proc.priority < mean_prio - 1.5):
+            if urgent_proc.remaining_time <= min_rem:
+                q = max(2, min(self.base_quantum, urgent_proc.remaining_time))
+                reason = (f"Urgent real-time process P{urgent_proc.pid} (priority={urgent_proc.priority}, "
+                          f"rem={urgent_proc.remaining_time}) detected; preempting with Priority policy.")
+                return POLICY_PRIORITY, q, reason
 
-        if mean_io > 0.45:
-            q = max(2, int(median_rem))
-            reason = (f"I/O-dominated queue (avg I/O freq={mean_io:.2f}); "
-                      f"Round Robin with dynamic Q={q} for low response time.")
+        # 2. Interactive I/O Queue
+        interactive_procs = [p for p in ready if p.io_frequency >= 0.60]
+        if len(interactive_procs) >= 2 and min(p.remaining_time for p in interactive_procs) <= 4:
+            q = max(2, min(self.base_quantum, int(median_rem)))
+            reason = (f"Interactive queue ({len(interactive_procs)} I/O-intensive jobs ready); "
+                      f"Round Robin with dynamic Q={q} ensures low response latency.")
             return POLICY_RR, q, reason
 
-        if mean_rem < 8 and count >= 2:
-            q = max(2, int(median_rem))
-            reason = (f"Short interactive jobs (avg remaining={mean_rem:.1f}); "
-                      f"Round Robin with dynamic Q={q}.")
-            return POLICY_RR, q, reason
-
-        if var_rem > 50:
-            reason = (f"High burst variance ({var_rem:.1f}); "
-                      f"SRTF minimises average turnaround time.")
-            return POLICY_SRTF, self.base_quantum, reason
-
-        reason = (f"CPU-bound queue (avg remaining={mean_rem:.1f}, "
-                  f"var={var_rem:.1f}); SRTF is optimal.")
+        # 3. High Variance / CPU-bound (SRTF optimal)
+        if var_rem > 25.0:
+            reason = (f"High burst variance ({var_rem:.1f}); SRTF preemptively clears short jobs "
+                      f"to avoid convoy effect.")
+        else:
+            reason = (f"CPU-bound queue (avg remaining={mean_rem:.1f}, var={var_rem:.1f}); "
+                      f"SRTF minimizes average turnaround time.")
         return POLICY_SRTF, self.base_quantum, reason
 
     # ── Main simulation ──────────────────────────────────────────────────
@@ -240,7 +250,7 @@ class TrueAdaptiveScheduler:
 
             # ── Policy (re-)evaluation ───────────────────────────────────
             feat = self._queue_features(ready)
-            policy, q, reason = self._select_policy(feat)
+            policy, q, reason = self._select_policy(feat, ready)
 
             if policy != last_policy:
                 adaptation_log.append({
@@ -290,7 +300,7 @@ class TrueAdaptiveScheduler:
             # ── Priority  (preempts if higher-priority process arrives) ───
             elif policy == POLICY_PRIORITY:
                 chosen = min(ready,
-                             key=lambda p: (p.priority, p.arrival_time, p.pid))
+                             key=lambda p: (p.priority, p.remaining_time, p.arrival_time, p.pid))
 
                 if last_pid not in (-1, chosen.pid):
                     context_switches += 1
@@ -298,16 +308,12 @@ class TrueAdaptiveScheduler:
                     chosen.start_time = current_time
 
                 pending = not_yet_arrived()
+                limit = q
                 if pending:
-                    urgent = [p for p in pending if p.priority < chosen.priority]
-                    if urgent:
-                        next_ev = min(p.arrival_time for p in urgent)
-                    else:
-                        next_ev = min(p.arrival_time for p in pending)
-                    run_for = min(chosen.remaining_time, next_ev - current_time)
-                else:
-                    run_for = chosen.remaining_time
-                run_for = max(1, run_for)
+                    next_ev = min(p.arrival_time for p in pending)
+                    if next_ev > current_time:
+                        limit = min(limit, next_ev - current_time)
+                run_for = max(1, min(chosen.remaining_time, limit))
 
                 start = current_time
                 chosen.remaining_time -= run_for
@@ -324,7 +330,7 @@ class TrueAdaptiveScheduler:
             # ── Round Robin ───────────────────────────────────────────────
             elif policy == POLICY_RR:
                 # Admit all currently-ready processes not yet in the queue
-                for p in ready:
+                for p in sorted(ready, key=lambda x: (x.remaining_time, x.arrival_time)):
                     if p.pid not in rr_enqueued:
                         rr_queue.append(p)
                         rr_enqueued.add(p.pid)
