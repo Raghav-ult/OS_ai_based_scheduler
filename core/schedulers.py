@@ -1,11 +1,12 @@
 """
 core/schedulers.py
 ------------------
-Full implementations of four classic CPU scheduling algorithms:
+Full implementations of classic CPU scheduling algorithms:
     1. First-Come First-Served (FCFS)
     2. Shortest Job First — Non-preemptive and Preemptive (SRTF)
     3. Round Robin (RR) with configurable time quantum
     4. Priority Scheduling (Non-preemptive, lower number = higher priority)
+    5. Priority Scheduling with Dynamic Aging (Anti-Starvation)
 
 Each function accepts a list of Process objects, runs the simulation
 from scratch (calling process.reset()), and returns:
@@ -44,9 +45,6 @@ def fcfs(processes: List[Process]) -> Dict[str, Any]:
 
     Processes are sorted by arrival time and executed to completion
     before the next one starts.
-
-    Returns:
-        dict with keys: 'processes', 'timeline', 'context_switches'
     """
     procs = _deep_copy_processes(processes)
     procs.sort(key=lambda p: (p.arrival_time, p.pid))
@@ -93,9 +91,6 @@ def sjf_non_preemptive(processes: List[Process]) -> Dict[str, Any]:
 
     At each scheduling decision point, the process with the shortest
     burst_time among all arrived processes is selected.
-
-    Returns:
-        dict with keys: 'processes', 'timeline', 'context_switches'
     """
     procs = _deep_copy_processes(processes)
 
@@ -107,15 +102,12 @@ def sjf_non_preemptive(processes: List[Process]) -> Dict[str, Any]:
     remaining = procs[:]
 
     while remaining:
-        # Gather processes that have arrived by current_time.
         available = [p for p in remaining if p.arrival_time <= current_time]
 
         if not available:
-            # Advance clock to the earliest arriving process.
             current_time = min(p.arrival_time for p in remaining)
             continue
 
-        # Pick the shortest burst time; break ties by arrival time then pid.
         chosen = min(available, key=lambda p: (p.burst_time, p.arrival_time, p.pid))
         remaining.remove(chosen)
 
@@ -149,13 +141,6 @@ def sjf_non_preemptive(processes: List[Process]) -> Dict[str, Any]:
 def sjf_preemptive(processes: List[Process]) -> Dict[str, Any]:
     """
     Preemptive Shortest Job First (Shortest Remaining Time First – SRTF).
-
-    At every time tick the ready queue is rescanned; if a newly arrived
-    process has a shorter remaining time than the current one, a preemption
-    occurs.
-
-    Returns:
-        dict with keys: 'processes', 'timeline', 'context_switches'
     """
     procs = _deep_copy_processes(processes)
     procs.sort(key=lambda p: p.arrival_time)
@@ -170,18 +155,15 @@ def sjf_preemptive(processes: List[Process]) -> Dict[str, Any]:
     interval_start = 0
 
     while completed_count < n:
-        # All processes that have arrived.
         available = [p for p in procs if p.arrival_time <= current_time and p.remaining_time > 0]
 
         if not available:
             current_time += 1
             continue
 
-        # Pick shortest remaining time.
         chosen = min(available, key=lambda p: (p.remaining_time, p.arrival_time, p.pid))
 
         if chosen.pid != last_pid:
-            # Flush previous interval.
             if current_proc is not None and interval_start < current_time:
                 current_proc.log_interval(interval_start, current_time)
                 timeline.append((current_proc.pid, interval_start, current_time))
@@ -195,7 +177,6 @@ def sjf_preemptive(processes: List[Process]) -> Dict[str, Any]:
         current_time += 1
 
         if chosen.remaining_time == 0:
-            # Flush the last interval and finalize.
             chosen.log_interval(interval_start, current_time)
             timeline.append((chosen.pid, interval_start, current_time))
             chosen.finalize(current_time)
@@ -218,15 +199,6 @@ def sjf_preemptive(processes: List[Process]) -> Dict[str, Any]:
 def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, Any]:
     """
     Preemptive Round Robin scheduler with a configurable time quantum.
-
-    Processes cycle through the ready queue in order of arrival;
-    each gets at most `time_quantum` ticks per turn.
-
-    Args:
-        time_quantum: Maximum CPU slice per scheduling turn (ticks).
-
-    Returns:
-        dict with keys: 'processes', 'timeline', 'context_switches'
     """
     if time_quantum <= 0:
         raise ValueError("time_quantum must be a positive integer.")
@@ -240,7 +212,6 @@ def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, An
     ready_queue: List[Process] = []
     last_pid = -1
 
-    # Index to track which processes have been enqueued.
     all_procs_sorted = sorted(procs, key=lambda p: (p.arrival_time, p.pid))
     enqueue_idx = 0
     n = len(procs)
@@ -253,17 +224,14 @@ def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, An
                 ready_queue.append(all_procs_sorted[enqueue_idx])
             enqueue_idx += 1
 
-    # Seed with processes arriving at t=0.
     enqueue_arrivals(current_time)
 
-    # If nothing arrived at 0, jump to first arrival.
     if not ready_queue and enqueue_idx < n:
         current_time = all_procs_sorted[enqueue_idx].arrival_time
         enqueue_arrivals(current_time)
 
     while completed_count < n:
         if not ready_queue:
-            # Idle: advance to next arrival.
             if enqueue_idx < n:
                 current_time = all_procs_sorted[enqueue_idx].arrival_time
                 enqueue_arrivals(current_time)
@@ -275,7 +243,6 @@ def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, An
             context_switches += 1
         last_pid = proc.pid
 
-        # Determine actual execution slice.
         exec_time = min(time_quantum, proc.remaining_time)
         start = current_time
         end = current_time + exec_time
@@ -286,14 +253,12 @@ def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, An
         proc.remaining_time -= exec_time
         current_time = end
 
-        # Enqueue any processes that arrived during this slice.
         enqueue_arrivals(current_time)
 
         if proc.remaining_time == 0:
             proc.finalize(current_time)
             completed_count += 1
         else:
-            # Re-enqueue at the back of the queue.
             ready_queue.append(proc)
 
     return {
@@ -305,19 +270,18 @@ def round_robin(processes: List[Process], time_quantum: int = 4) -> Dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# 5. Priority Scheduling (Non-preemptive, lower number = higher priority)
+# 5. Priority Scheduling (Static vs Dynamic Aging)
 # ---------------------------------------------------------------------------
 
-def priority_scheduling(processes: List[Process]) -> Dict[str, Any]:
+def priority_scheduling(
+    processes: List[Process],
+    enable_aging: bool = False,
+    aging_interval: int = 4,
+) -> Dict[str, Any]:
     """
-    Non-preemptive Priority Scheduler.
-
-    At each scheduling decision, selects the highest-priority process
-    (lowest `priority` value) from those that have arrived.
-    Ties broken by arrival time then pid.
-
-    Returns:
-        dict with keys: 'processes', 'timeline', 'context_switches'
+    Priority Scheduler.
+    If enable_aging is True, waiting processes gain 1 priority level every `aging_interval` ticks,
+    preventing lower-priority processes from starving indefinitely.
     """
     procs = _deep_copy_processes(processes)
 
@@ -335,8 +299,13 @@ def priority_scheduling(processes: List[Process]) -> Dict[str, Any]:
             current_time = min(p.arrival_time for p in remaining)
             continue
 
-        # Lower priority number = higher urgency.
-        chosen = min(available, key=lambda p: (p.priority, p.arrival_time, p.pid))
+        if enable_aging:
+            for p in available:
+                p.update_effective_priority(current_time, aging_interval)
+            chosen = min(available, key=lambda p: (p.effective_priority, p.arrival_time, p.pid))
+        else:
+            chosen = min(available, key=lambda p: (p.priority, p.arrival_time, p.pid))
+
         remaining.remove(chosen)
 
         start = current_time
@@ -354,9 +323,15 @@ def priority_scheduling(processes: List[Process]) -> Dict[str, Any]:
         current_time = end
         completed.append(chosen)
 
+    algo_name = f"Priority (Aging Every {aging_interval}t)" if enable_aging else "Priority (Static)"
     return {
         "processes": completed,
         "timeline": timeline,
         "context_switches": context_switches,
-        "algorithm": "Priority Scheduling",
+        "algorithm": algo_name,
     }
+
+
+def priority_aging(processes: List[Process], aging_interval: int = 4) -> Dict[str, Any]:
+    """Explicit helper to run Priority Scheduling with Anti-Starvation Aging enabled."""
+    return priority_scheduling(processes, enable_aging=True, aging_interval=aging_interval)

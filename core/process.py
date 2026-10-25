@@ -2,7 +2,8 @@
 core/process.py
 ---------------
 Defines the Process class representing a single schedulable unit.
-Tracks all scheduling metrics and execution intervals for Gantt chart rendering.
+Tracks all scheduling metrics, dynamic priority aging, starvation metrics,
+and execution intervals for Gantt chart rendering.
 """
 
 from dataclasses import dataclass, field
@@ -28,6 +29,9 @@ class Process:
         waiting_time   : Total time spent in the ready queue.
         turnaround_time: completion_time - arrival_time.
         response_time  : start_time - arrival_time.
+        last_cpu_time  : Wall-clock tick when process last relinquished or touched CPU.
+        effective_priority: Dynamically adjusted priority taking aging into account.
+        starvation_rescues: Number of times this process was boosted by anti-starvation guard.
     """
 
     # --- Identity & input parameters ---
@@ -41,6 +45,9 @@ class Process:
     remaining_time: int = field(init=False)
     start_time: Optional[int] = field(default=None, init=False)
     completion_time: Optional[int] = field(default=None, init=False)
+    last_cpu_time: int = field(default=0, init=False)
+    effective_priority: int = field(default=0, init=False)
+    starvation_rescues: int = field(default=0, init=False)
 
     # --- Derived scheduling metrics (populated after simulation) ---
     waiting_time: float = field(default=0.0, init=False)
@@ -53,6 +60,32 @@ class Process:
 
     def __post_init__(self):
         self.remaining_time = self.burst_time
+        self.effective_priority = self.priority
+        self.last_cpu_time = self.arrival_time
+
+    # ------------------------------------------------------------------
+    # Priority Aging & Anti-Starvation Helpers
+    # ------------------------------------------------------------------
+
+    def update_effective_priority(self, current_time: int, aging_interval: int = 4) -> int:
+        """
+        Dynamically age the process based on time spent waiting in the ready queue.
+        Lower number = higher priority. Priority improves by 1 every aging_interval ticks.
+        """
+        if current_time <= self.arrival_time:
+            self.effective_priority = self.priority
+            return self.effective_priority
+
+        wait_duration = current_time - max(self.arrival_time, self.last_cpu_time)
+        priority_boost = int(wait_duration // max(1, aging_interval))
+        self.effective_priority = max(1, self.priority - priority_boost)
+        return self.effective_priority
+
+    def current_wait_since_active(self, current_time: int) -> int:
+        """Returns the continuous duration this process has waited without touching CPU."""
+        if current_time <= self.arrival_time:
+            return 0
+        return current_time - max(self.arrival_time, self.last_cpu_time)
 
     # ------------------------------------------------------------------
     # Execution history helpers
@@ -63,6 +96,7 @@ class Process:
         if start >= end:
             return
         self.execution_intervals.append((start, end))
+        self.last_cpu_time = end
 
         # Track first time the process touched the CPU.
         if self.start_time is None:
@@ -90,6 +124,9 @@ class Process:
         self.remaining_time = self.burst_time
         self.start_time = None
         self.completion_time = None
+        self.last_cpu_time = self.arrival_time
+        self.effective_priority = self.priority
+        self.starvation_rescues = 0
         self.waiting_time = 0.0
         self.turnaround_time = 0.0
         self.response_time = 0.0
@@ -103,6 +140,7 @@ class Process:
         return (
             f"Process(pid={self.pid}, arrival={self.arrival_time}, "
             f"burst={self.burst_time}, priority={self.priority}, "
+            f"effective_prio={self.effective_priority}, "
             f"io_freq={self.io_frequency:.2f})"
         )
 
@@ -113,6 +151,8 @@ class Process:
             "Arrival Time": self.arrival_time,
             "Burst Time": self.burst_time,
             "Priority": self.priority,
+            "Effective Priority": self.effective_priority,
+            "Starvation Rescues": self.starvation_rescues,
             "I/O Frequency": round(self.io_frequency, 3),
             "Start Time": self.start_time,
             "Completion Time": self.completion_time,

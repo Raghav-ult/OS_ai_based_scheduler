@@ -20,6 +20,7 @@ from core.schedulers import (
     sjf_preemptive,
     round_robin,
     priority_scheduling,
+    priority_aging,
 )
 
 
@@ -82,39 +83,33 @@ class SimulationEngine:
         results = engine.run_all(time_quantum=4)
     """
 
-    ALGORITHM_KEYS = ["FCFS", "SJF", "RR", "Priority"]
+    ALGORITHM_KEYS = ["FCFS", "SJF", "SRTF", "RR", "Priority", "PriorityAging"]
 
     def __init__(self, processes: List[Process]):
         if not processes:
             raise ValueError("Process list must not be empty.")
         self.processes = processes
 
-    def run_all(self, time_quantum: int = 4) -> Dict[str, Dict[str, Any]]:
+    def run_all(self, time_quantum: int = 4, aging_interval: int = 4) -> Dict[str, Dict[str, Any]]:
         """
-        Run all four classic schedulers on the stored process batch.
+        Run classic schedulers on the stored process batch.
 
         Args:
             time_quantum: Time slice for Round Robin.
+            aging_interval: Time units for priority aging decrement.
 
         Returns:
-            Dictionary keyed by algorithm name, each containing:
-                - 'processes'       : List[Process] with filled metrics.
-                - 'timeline'        : List of (pid, start, end) tuples.
-                - 'context_switches': int.
-                - 'algorithm'       : Human-readable name string.
-                - 'avg_waiting_time'     : float.
-                - 'avg_turnaround_time'  : float.
-                - 'avg_response_time'    : float.
-                - 'throughput'           : float (processes / total time unit).
+            Dictionary keyed by algorithm name.
         """
         results: Dict[str, Dict[str, Any]] = {}
 
         schedulers = {
-            "FCFS":     lambda: fcfs(self.processes),
-            "SJF":      lambda: sjf_non_preemptive(self.processes),
-            "SRTF":     lambda: sjf_preemptive(self.processes),
-            "RR":       lambda: round_robin(self.processes, time_quantum),
-            "Priority": lambda: priority_scheduling(self.processes),
+            "FCFS":          lambda: fcfs(self.processes),
+            "SJF":           lambda: sjf_non_preemptive(self.processes),
+            "SRTF":          lambda: sjf_preemptive(self.processes),
+            "RR":            lambda: round_robin(self.processes, time_quantum),
+            "Priority":      lambda: priority_scheduling(self.processes, enable_aging=False),
+            "PriorityAging": lambda: priority_aging(self.processes, aging_interval=aging_interval),
         }
 
         for key, run_fn in schedulers.items():
@@ -127,26 +122,20 @@ class SimulationEngine:
 
         return results
 
-    def run_single(self, algorithm: str, time_quantum: int = 4) -> Dict[str, Any]:
+    def run_single(self, algorithm: str, time_quantum: int = 4, aging_interval: int = 4) -> Dict[str, Any]:
         """
         Run a single named algorithm.
-
-        Args:
-            algorithm   : One of 'FCFS', 'SJF', 'RR', 'Priority'.
-            time_quantum: Used only when algorithm == 'RR'.
-
-        Returns:
-            Result dict (same schema as run_all entries).
         """
         dispatch = {
             "FCFS": lambda: fcfs(self.processes),
             "SJF": lambda: sjf_non_preemptive(self.processes),
             "SRTF": lambda: sjf_preemptive(self.processes),
             "RR": lambda: round_robin(self.processes, time_quantum),
-            "Priority": lambda: priority_scheduling(self.processes),
+            "PRIORITY": lambda: priority_scheduling(self.processes, enable_aging=False),
+            "PRIORITYAGING": lambda: priority_aging(self.processes, aging_interval=aging_interval),
         }
 
-        key = algorithm.upper()
+        key = algorithm.upper().replace(" ", "").replace("_", "")
         if key not in dispatch:
             raise ValueError(
                 f"Unknown algorithm '{algorithm}'. "
@@ -177,7 +166,6 @@ class SimulationEngine:
         total_tt = sum(p.turnaround_time for p in procs)
         total_rt = sum(p.response_time for p in procs)
 
-        # Throughput = processes completed per unit time (full span).
         all_completions = [p.completion_time for p in procs if p.completion_time is not None]
         all_arrivals = [p.arrival_time for p in procs]
         span = (max(all_completions) - min(all_arrivals)) if all_completions else 1
