@@ -93,7 +93,7 @@ class TrueAdaptiveScheduler:
     At every scheduling decision point the algorithm:
         1. Checks for starving processes (continuous wait > starvation_threshold).
            If detected, deterministic fallback triggers: process is given immediate execution.
-        2. Applies Dynamic Priority Aging to all waiting processes.
+        2. Applies Dynamic Priority Aging to all waiting processes and logs aging boosts.
         3. Extracts ready-queue telemetry (variance, I/O ratio, priority spread).
         4. Dynamically switches between SRTF, Round Robin (dynamic Q), and Priority.
         5. Logs policy transitions and anti-starvation preemption events.
@@ -151,18 +151,14 @@ class TrueAdaptiveScheduler:
         if starving_procs:
             starved = max(starving_procs, key=lambda p: p.current_wait_since_active(current_time))
             wait_ticks = starved.current_wait_since_active(current_time)
+            aged_info = f", aged priority {starved.priority} → {starved.effective_priority}" if starved.priority != starved.effective_priority else ""
             reason = (
                 f"⚠️ Anti-Starvation Watchdog Alert: P{starved.pid} waited {wait_ticks} ticks "
-                f"without CPU access (threshold={self.starvation_threshold}). "
+                f"without CPU access (threshold={self.starvation_threshold}{aged_info}). "
                 f"Deterministic fallback triggered to guarantee fairness."
             )
             q = max(2, min(self.base_quantum, starved.remaining_time))
             return POLICY_STARVATION, q, reason, starved
-
-        # Apply Aging to ready queue
-        if self.enable_aging:
-            for p in ready:
-                p.update_effective_priority(current_time, self.aging_interval)
 
         var_rem     = feat["var_rem"]
         min_rem     = feat["min_rem"]
@@ -243,6 +239,22 @@ class TrueAdaptiveScheduler:
                     break
                 current_time = min(p.arrival_time for p in pending)
                 continue
+
+            # Update Priority Aging on waiting processes and log aging boosts
+            if self.enable_aging:
+                for p in ready:
+                    old_prio = p.effective_priority
+                    new_prio = p.update_effective_priority(current_time, self.aging_interval)
+                    if new_prio < old_prio:
+                        wait_t = p.current_wait_since_active(current_time)
+                        adaptation_log.append({
+                            "time":       current_time,
+                            "policy":     "Priority (Aging)",
+                            "event":      f"Priority Aging: P{p.pid}",
+                            "reason":     f"⚡ Dynamic Priority Aging: P{p.pid} aged {old_prio} → {new_prio} after waiting {wait_t} ticks without CPU access.",
+                            "queue_size": len(ready),
+                            "queue_pids": [proc.pid for proc in ready],
+                        })
 
             feat = self._queue_features(ready)
             policy, q, reason, target_proc = self._select_policy(feat, ready, current_time)
@@ -526,10 +538,22 @@ class DualCoreAdaptiveScheduler:
                 current_time = min(p.arrival_time for p in pending)
                 continue
 
-            # Update Priority Aging on ready processes
+            # Update Priority Aging on ready processes and log aging boosts
             if self.enable_aging:
                 for p in ready:
-                    p.update_effective_priority(current_time, self.aging_interval)
+                    old_prio = p.effective_priority
+                    new_prio = p.update_effective_priority(current_time, self.aging_interval)
+                    if new_prio < old_prio:
+                        wait_t = p.current_wait_since_active(current_time)
+                        adaptation_log.append({
+                            "time":       current_time,
+                            "core":       "SMP",
+                            "policy":     "Priority (Aging)",
+                            "event":      f"Priority Aging: P{p.pid}",
+                            "reason":     f"⚡ Dynamic Priority Aging: P{p.pid} aged {old_prio} → {new_prio} after waiting {wait_t} ticks without CPU access.",
+                            "queue_size": len(ready),
+                            "queue_pids": [proc.pid for proc in ready],
+                        })
 
             # Assign ready processes to idle cores
             for core_id in [0, 1]:
@@ -547,9 +571,10 @@ class DualCoreAdaptiveScheduler:
                         chosen = max(starving, key=lambda p: p.current_wait_since_active(current_time))
                         policy = POLICY_STARVATION
                         q = max(2, min(self.base_quantum, chosen.remaining_time))
+                        aged_info = f", aged priority {chosen.priority} → {chosen.effective_priority}" if chosen.priority != chosen.effective_priority else ""
                         reason = (
                             f"Core {core_id} Anti-Starvation Watchdog: P{chosen.pid} starved for "
-                            f"{chosen.current_wait_since_active(current_time)} ticks. Deterministic dispatch."
+                            f"{chosen.current_wait_since_active(current_time)} ticks{aged_info}. Deterministic dispatch."
                         )
                         chosen.starvation_rescues += 1
                         starvation_rescues += 1

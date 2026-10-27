@@ -31,6 +31,7 @@ class Process:
         response_time  : start_time - arrival_time.
         last_cpu_time  : Wall-clock tick when process last relinquished or touched CPU.
         effective_priority: Dynamically adjusted priority taking aging into account.
+        peak_effective_priority: Best (lowest number) priority reached via aging.
         starvation_rescues: Number of times this process was boosted by anti-starvation guard.
     """
 
@@ -47,6 +48,7 @@ class Process:
     completion_time: Optional[int] = field(default=None, init=False)
     last_cpu_time: int = field(default=0, init=False)
     effective_priority: int = field(default=0, init=False)
+    peak_effective_priority: int = field(default=0, init=False)
     starvation_rescues: int = field(default=0, init=False)
 
     # --- Derived scheduling metrics (populated after simulation) ---
@@ -61,6 +63,7 @@ class Process:
     def __post_init__(self):
         self.remaining_time = self.burst_time
         self.effective_priority = self.priority
+        self.peak_effective_priority = self.priority
         self.last_cpu_time = self.arrival_time
 
     # ------------------------------------------------------------------
@@ -71,14 +74,17 @@ class Process:
         """
         Dynamically age the process based on time spent waiting in the ready queue.
         Lower number = higher priority. Priority improves by 1 every aging_interval ticks.
+        Records peak_effective_priority so historical aged priority is preserved.
         """
         if current_time <= self.arrival_time:
             self.effective_priority = self.priority
+            self.peak_effective_priority = min(self.peak_effective_priority, self.effective_priority)
             return self.effective_priority
 
         wait_duration = current_time - max(self.arrival_time, self.last_cpu_time)
         priority_boost = int(wait_duration // max(1, aging_interval))
         self.effective_priority = max(1, self.priority - priority_boost)
+        self.peak_effective_priority = min(self.peak_effective_priority, self.effective_priority)
         return self.effective_priority
 
     def current_wait_since_active(self, current_time: int) -> int:
@@ -126,6 +132,7 @@ class Process:
         self.completion_time = None
         self.last_cpu_time = self.arrival_time
         self.effective_priority = self.priority
+        self.peak_effective_priority = self.priority
         self.starvation_rescues = 0
         self.waiting_time = 0.0
         self.turnaround_time = 0.0
@@ -140,7 +147,8 @@ class Process:
         return (
             f"Process(pid={self.pid}, arrival={self.arrival_time}, "
             f"burst={self.burst_time}, priority={self.priority}, "
-            f"effective_prio={self.effective_priority}, "
+            f"peak_aged_prio={self.peak_effective_priority}, "
+            f"rescues={self.starvation_rescues}, "
             f"io_freq={self.io_frequency:.2f})"
         )
 
@@ -151,7 +159,9 @@ class Process:
             "Arrival Time": self.arrival_time,
             "Burst Time": self.burst_time,
             "Priority": self.priority,
-            "Effective Priority": self.effective_priority,
+            "Initial Priority": self.priority,
+            "Effective Priority": self.peak_effective_priority,
+            "Peak Aged Priority": self.peak_effective_priority,
             "Starvation Rescues": self.starvation_rescues,
             "I/O Frequency": round(self.io_frequency, 3),
             "Start Time": self.start_time,

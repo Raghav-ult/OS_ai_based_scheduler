@@ -139,10 +139,11 @@ def processes_to_dataframe(processes: List[Process]) -> pd.DataFrame:
     rows = [p.to_dict() for p in processes]
     df = pd.DataFrame(rows)
 
-    # Reorder columns for readability.
+    # Reorder columns for readability, surfacing Priority Aging and Starvation Rescues
     ordered_cols = [
-        "PID", "Arrival Time", "Burst Time", "Priority", "I/O Frequency",
-        "Start Time", "Completion Time",
+        "PID", "Arrival Time", "Burst Time",
+        "Initial Priority", "Peak Aged Priority", "Starvation Rescues",
+        "I/O Frequency", "Start Time", "Completion Time",
         "Waiting Time", "Turnaround Time", "Response Time",
     ]
     existing = [c for c in ordered_cols if c in df.columns]

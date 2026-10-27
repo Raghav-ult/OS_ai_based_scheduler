@@ -445,14 +445,22 @@ def render_adaptation_log(adaptation_log: list):
         POLICY_RR:         '<span class="badge badge-rr">Round Robin</span>',
         POLICY_PRIORITY:   '<span class="badge badge-priority">Priority</span>',
         POLICY_STARVATION: '<span class="badge badge-starvation">⚠️ Starvation Guard</span>',
+        "Priority (Aging)": '<span class="badge" style="background:rgba(245,158,11,0.22);color:#fbbf24;border:1px solid rgba(245,158,11,0.5);">⚡ Aging Boost</span>',
     }
 
     rows_html = ""
     for ev in adaptation_log:
-        badge = BADGE.get(ev.get("policy"), ev.get("policy", "—"))
+        badge = BADGE.get(ev.get("policy"), f'<span class="badge badge-priority">{ev.get("policy", "—")}</span>')
         pids  = ", ".join(f"P{p}" for p in ev.get("queue_pids", []))
         core_info = f"<span style='color:#67e8f9;font-weight:600;'>{ev.get('core')}</span>" if "core" in ev else "CPU"
-        bg    = "rgba(239,68,68,0.12)" if ev.get("policy") == POLICY_STARVATION else "rgba(102,126,234,0.06)"
+        is_starv = ev.get("policy") == POLICY_STARVATION or "Starvation" in str(ev.get("event", ""))
+        is_aging = "Aging" in str(ev.get("policy", "")) or "Aging" in str(ev.get("event", ""))
+        if is_starv:
+            bg = "rgba(239,68,68,0.14)"
+        elif is_aging:
+            bg = "rgba(245,158,11,0.10)"
+        else:
+            bg = "rgba(102,126,234,0.06)"
 
         rows_html += f"""
         <tr style="border-bottom:1px solid rgba(255,255,255,0.06);background:{bg};">
